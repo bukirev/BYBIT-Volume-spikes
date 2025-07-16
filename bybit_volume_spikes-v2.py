@@ -6,7 +6,7 @@ import numpy as np
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QTableWidget, QTableWidgetItem, QHeaderView, QLabel,
     QComboBox, QPushButton, QHBoxLayout, QAbstractItemView, QDialog, QFormLayout, QDialogButtonBox,
-    QDoubleSpinBox, QGroupBox, QCheckBox, QLineEdit, QSystemTrayIcon, QMessageBox, QMenu, QAction, QSpinBox
+    QDoubleSpinBox, QGroupBox, QCheckBox, QLineEdit, QSystemTrayIcon, QMessageBox, QMenu, QAction, QSpinBox, QRadioButton, QButtonGroup
 )
 from PyQt5.QtCore import QTimer, Qt, QSettings
 from PyQt5.QtGui import QColor, QBrush, QFont
@@ -119,14 +119,7 @@ class NotificationSystem:
         # Всплывающее уведомление
         if self.parent.settings["enable_popup"]:
             try:
-                if not QSystemTrayIcon.isSystemTrayAvailable():
-                    return
-                    
-                if not hasattr(self.parent, 'tray_icon'):
-                    self.parent.tray_icon = QSystemTrayIcon(self.parent)
-                    self.parent.tray_icon.setIcon(self.parent.windowIcon())
-                    
-                self.parent.tray_icon.showMessage("Объемная вспышка!", message, QSystemTrayIcon.Information, 5000)
+                QMessageBox.information(self.parent, "Объемная вспышка!", message)
             except Exception as e:
                 print(f"Ошибка уведомления: {e}")
         
@@ -160,10 +153,15 @@ class BybitVolumeSpikesWidget(QWidget):
         
         # Фильтр по типу
         filter_layout.addWidget(QLabel("Тип:"))
-        self.type_combo = QComboBox()
-        self.type_combo.addItems(["Все", "spot", "linear"])
-        self.type_combo.currentIndexChanged.connect(self.update_table)
-        filter_layout.addWidget(self.type_combo)
+        self.spot_radio = QRadioButton("spot")
+        self.linear_radio = QRadioButton("фьючерсы")
+        self.type_group = QButtonGroup(self)
+        self.type_group.addButton(self.spot_radio)
+        self.type_group.addButton(self.linear_radio)
+        filter_layout.addWidget(self.spot_radio)
+        filter_layout.addWidget(self.linear_radio)
+        self.spot_radio.toggled.connect(self.on_type_changed)
+        self.linear_radio.toggled.connect(self.on_type_changed)
         
         # Фильтр по имени
         filter_layout.addWidget(QLabel("Фильтр:"))
@@ -213,6 +211,11 @@ class BybitVolumeSpikesWidget(QWidget):
         
         # Загрузка настроек
         self.load_settings()
+        # Восстановить выбор типа
+        if self.settings.get("selected_type", "spot") == "spot":
+            self.spot_radio.setChecked(True)
+        else:
+            self.linear_radio.setChecked(True)
         self.timer.start(self.settings["update_interval"] * 1000)
         
         # Система уведомлений
@@ -283,7 +286,7 @@ class BybitVolumeSpikesWidget(QWidget):
         self.status_label.setText(f"Скопировано: {text}")
 
     def update_table(self):
-        type_filter = self.type_combo.currentText()
+        type_filter = self.settings.get("selected_type", "spot")
         name_filter = self.name_filter_edit.text().strip().upper()
         min_ratio = self.settings["min_ratio"]
         min_volume = self.settings["min_volume"]
@@ -295,7 +298,7 @@ class BybitVolumeSpikesWidget(QWidget):
                 continue
                 
             # Применяем фильтры
-            if type_filter != "Все" and v['category'] != type_filter:
+            if v['category'] != type_filter:
                 continue
                 
             if name_filter and name_filter not in v['symbol'].upper():
@@ -471,6 +474,14 @@ class BybitVolumeSpikesWidget(QWidget):
             category = self.table.item(index.row(), 1).text()
             self.open_tradingview(symbol, category)
 
+    def on_type_changed(self):
+        selected = "spot" if self.spot_radio.isChecked() else "linear"
+        self.settings["selected_type"] = selected
+        self.save_settings()
+        self.set_status("Загрузка истории и расчёт средних...")
+        import qasync
+        qasync.asyncio.ensure_future(self.async_load_stats())
+
     def load_settings(self):
         settings = QSettings("VolumeSpikes", "BybitMonitor")
         self.settings = {
@@ -479,7 +490,8 @@ class BybitVolumeSpikesWidget(QWidget):
             "update_interval": settings.value("update_interval", 90, int),
             "window_size": settings.value("window_size", "Текущий день", str),
             "enable_sound": settings.value("enable_sound", True, bool),
-            "enable_popup": settings.value("enable_popup", True, bool)
+            "enable_popup": settings.value("enable_popup", True, bool),
+            "selected_type": settings.value("selected_type", "spot", str)
         }
         # Загрузка игнорируемых тикеров
         ignored = settings.value("ignored_tickers", "")
@@ -500,6 +512,7 @@ class BybitVolumeSpikesWidget(QWidget):
 
     async def recalculate_means(self):
         from_ts = self.get_window_timestamp()
+        selected_type = self.settings.get("selected_type", "spot")
         for idx, (symbol, category) in enumerate(self.tickers):
             if (symbol, category) in self.ignored_tickers:
                 continue
@@ -537,7 +550,8 @@ class BybitVolumeSpikesWidget(QWidget):
 
     async def async_load_stats(self):
         from_ts = self.get_window_timestamp()
-        self.tickers = await self.get_all_tickers()
+        selected_type = self.settings.get("selected_type", "spot")
+        self.tickers = await self.get_all_tickers(selected_type)
         self.ticker_data = {}
         
         for idx, (symbol, category) in enumerate(self.tickers):
@@ -564,18 +578,17 @@ class BybitVolumeSpikesWidget(QWidget):
         self.set_status("Готово. Ожидание онлайн-обновлений...")
         await self.update_online()
 
-    async def get_all_tickers(self):
+    async def get_all_tickers(self, selected_type):
         tickers = []
         async with aiohttp.ClientSession() as session:
-            for category in CATEGORIES:
-                try:
-                    url = BYBIT_SYMBOLS_URL.format(category=category)
-                    async with session.get(url, timeout=10) as resp:
-                        data = await resp.json()
-                        for x in data['result']['list']:
-                            tickers.append((x['symbol'], category))
-                except Exception as e:
-                    print(f"Ошибка получения тикеров {category}: {e}")
+            try:
+                url = BYBIT_SYMBOLS_URL.format(category=selected_type)
+                async with session.get(url, timeout=10) as resp:
+                    data = await resp.json()
+                    for x in data['result']['list']:
+                        tickers.append((x['symbol'], selected_type))
+            except Exception as e:
+                print(f"Ошибка получения тикеров {selected_type}: {e}")
         return tickers
 
     async def get_klines(self, symbol, category, from_ts):
@@ -598,7 +611,7 @@ class BybitVolumeSpikesWidget(QWidget):
         now = datetime.utcnow().replace(tzinfo=timezone.utc)
         from_ts = int((now - timedelta(minutes=30)).timestamp())
         count = 0
-        
+        selected_type = self.settings.get("selected_type", "spot")
         for idx, (symbol, category) in enumerate(list(self.ticker_data.keys())):
             # Пропускаем игнорируемые тикеры
             if (symbol, category) in self.ignored_tickers:
