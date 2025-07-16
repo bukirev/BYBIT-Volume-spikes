@@ -104,7 +104,7 @@ python bybit_volume_spikes-v2.py
 ## 🤝 Поддержка и обратная связь
 
 Сообщения об ошибках и запросы функций:  
-[Issues](https://github.com/your-repo/bybit-volume-spikes/issues)
+
 
 ---
 
