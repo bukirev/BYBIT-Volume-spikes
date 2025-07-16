@@ -30,7 +30,7 @@ pip install pyqt5 aiohttp numpy qasync
 2. Склонируйте репозиторий:
 ```bash
 
-git clone https://github.com/your-repo/bybit-volume-spikes.git
+git clone https://github.com/bukirev/BYBIT-Volume-spikes.git
 cd bybit-volume-spikes
 ```
 
