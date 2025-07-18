@@ -56,10 +56,12 @@ class SettingsDialog(QDialog):
         self.update_interval_spin.setSuffix(" сек")
         update_layout.addRow("Интервал обновления:", self.update_interval_spin)
         
-        self.window_size_combo = QComboBox()
-        self.window_size_combo.addItems(["Текущий день", "Последние 4 часа", "Последние 24 часа", "Последние 48 часов"])
-        self.window_size_combo.setCurrentText(parent.settings["window_size"])
-        update_layout.addRow("Период для среднего:", self.window_size_combo)
+        # Количество свечей для среднего
+        self.candles_spin = QSpinBox()
+        self.candles_spin.setRange(4, 999)
+        self.candles_spin.setValue(parent.settings.get("mean_candles", 20))
+        update_layout.addRow("Кол-во свечей для среднего:", self.candles_spin)
+        
         update_group.setLayout(update_layout)
         layout.addWidget(update_group)
         
@@ -101,6 +103,30 @@ class SettingsDialog(QDialog):
         telegram_group.setLayout(telegram_layout)
         layout.addWidget(telegram_group)
         
+        # Размер шрифта интерфейса
+        self.font_size_spin = QSpinBox()
+        self.font_size_spin.setRange(8, 24)
+        self.font_size_spin.setValue(parent.settings.get("font_size", 12))
+        layout.addWidget(QLabel("Размер шрифта интерфейса:"))
+        layout.addWidget(self.font_size_spin)
+        
+        # Размеры шрифта по частям интерфейса
+        self.font_size_table_spin = QSpinBox()
+        self.font_size_table_spin.setRange(8, 24)
+        self.font_size_table_spin.setValue(parent.settings.get("font_size_table", 12))
+        layout.addWidget(QLabel("Размер шрифта таблицы:"))
+        layout.addWidget(self.font_size_table_spin)
+        self.font_size_panel_spin = QSpinBox()
+        self.font_size_panel_spin.setRange(8, 24)
+        self.font_size_panel_spin.setValue(parent.settings.get("font_size_panel", 12))
+        layout.addWidget(QLabel("Размер шрифта панели и кнопок:"))
+        layout.addWidget(self.font_size_panel_spin)
+        self.font_size_log_spin = QSpinBox()
+        self.font_size_log_spin.setRange(8, 24)
+        self.font_size_log_spin.setValue(parent.settings.get("font_size_log", 12))
+        layout.addWidget(QLabel("Размер шрифта журнала уведомлений:"))
+        layout.addWidget(self.font_size_log_spin)
+        
         # Кнопки
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -112,7 +138,7 @@ class SettingsDialog(QDialog):
             "min_ratio": self.min_ratio_spin.value(),
             "min_volume": self.min_volume_spin.value(),
             "update_interval": self.update_interval_spin.value(),
-            "window_size": self.window_size_combo.currentText(),
+            "mean_candles": self.candles_spin.value(),
             "enable_sound": self.enable_sound_cb.isChecked(),
             "enable_popup": self.enable_popup_cb.isChecked(),
             "telegram_token": self.telegram_token_edit.text().strip(),
@@ -120,6 +146,10 @@ class SettingsDialog(QDialog):
             "telegram_thread_id": self.telegram_thread_id_edit.text().strip(),
             "enable_telegram": self.enable_telegram_cb.isChecked(),
             "log_limit": self.log_limit_spin.value(),
+            "font_size": self.font_size_spin.value(),
+            "font_size_table": self.font_size_table_spin.value(),
+            "font_size_panel": self.font_size_panel_spin.value(),
+            "font_size_log": self.font_size_log_spin.value(),
         }
         return s
 
@@ -160,6 +190,10 @@ class NotificationLogDialog(QDialog):
         self.text_edit.setReadOnly(True)
         layout.addWidget(self.text_edit)
         self.load_log()
+        log_font = self.text_edit.font()
+        log_font.setPointSize(parent.settings.get("font_size_log", 12))
+        self.text_edit.setFont(log_font)
+        self.restore_log_window_geometry()
     def load_log(self):
         limit = getattr(self.parent(), 'settings', {}).get('log_limit', 50) if self.parent() else 50
         if os.path.exists(NOTIFICATION_LOG_FILE):
@@ -168,6 +202,21 @@ class NotificationLogDialog(QDialog):
                 self.text_edit.setPlainText(''.join(lines[:limit]))
         else:
             self.text_edit.setPlainText("Журнал пуст.")
+
+    def restore_log_window_geometry(self):
+        settings = QSettings("VolumeSpikes", "BybitMonitor")
+        geometry = settings.value("log_window_geometry")
+        if geometry:
+            self.restoreGeometry(geometry)
+        pos = settings.value("log_window_pos")
+        if pos:
+            self.move(pos)
+
+    def closeEvent(self, event):
+        settings = QSettings("VolumeSpikes", "BybitMonitor")
+        settings.setValue("log_window_geometry", self.saveGeometry())
+        settings.setValue("log_window_pos", self.pos())
+        super().closeEvent(event)
 
 class NotificationSystem:
     def __init__(self, parent):
@@ -361,6 +410,7 @@ class BybitVolumeSpikesWidget(QWidget):
         
         # Загрузка настроек
         self.load_settings()
+        self.apply_font_size()
         # Восстановить выбор типа
         if self.settings.get("selected_type", "spot") == "spot":
             self.spot_radio.setChecked(True)
@@ -375,6 +425,8 @@ class BybitVolumeSpikesWidget(QWidget):
         self.init_task = None
         self.load_stats()
         self.notification_log_dialog = None
+        self.apply_font_sizes()
+        self.restore_main_window_geometry()
 
     def set_status(self, text):
         self.status_label.setText(text)
@@ -442,39 +494,32 @@ class BybitVolumeSpikesWidget(QWidget):
         min_ratio = self.settings["min_ratio"]
         min_volume = self.settings["min_volume"]
         show_all = self.show_all_cb.isChecked()
+        table_font = self.table.font()
+        table_font.setPointSize(self.settings.get("font_size_table", 12))
         print(f"[DEBUG] update_table: type_filter={type_filter}, show_all={show_all}, min_ratio={min_ratio}, min_volume={min_volume}")
         print(f"[DEBUG] Всего тикеров в ticker_data: {len(self.ticker_data)}")
         for k, v in self.ticker_data.items():
             print(f"[DEBUG] {v['symbol']} category: {v['category']}, volume: {v['volume']}, ratio: {v['ratio']}")
         rows = []
         for key, v in self.ticker_data.items():
-            # Пропускаем игнорируемые тикеры
             if key in self.ignored_tickers:
                 continue
-                
-            # Применяем фильтры
             if v['category'] != type_filter:
                 continue
-                
             if name_filter and name_filter not in v['symbol'].upper():
                 continue
-                
             if not show_all:
                 if v['volume'] < min_volume or v['ratio'] < min_ratio:
                     continue
-                
             rows.append(v)
-        
         # Сортировка
         if self.volume_sort_cb.isChecked():
             rows.sort(key=lambda x: x['volume'], reverse=True)
         else:
             rows.sort(key=lambda x: x['ratio'], reverse=True)
-            
         # Отображение
         max_ratio = max(r['ratio'] for r in rows) if rows else 0
         self.table.setRowCount(len(rows))
-        
         for row_idx, r in enumerate(rows):
             items = [
                 QTableWidgetItem(r['symbol']),
@@ -484,7 +529,9 @@ class BybitVolumeSpikesWidget(QWidget):
                 QTableWidgetItem(f"{r['ratio']:.2f}"),
                 QTableWidgetItem(r['datetime']),
             ]
-            
+            # Применяем шрифт к каждому элементу
+            for item in items:
+                item.setFont(table_font)
             # Цветовая индикация
             if r['ratio'] == max_ratio and max_ratio > 1:
                 for item in items:
@@ -498,11 +545,9 @@ class BybitVolumeSpikesWidget(QWidget):
                 for item in items:
                     item.setBackground(QBrush(QColor(60, 60, 0)))  # Темно-желтый
                 items[4].setForeground(QBrush(QColor(255, 215, 0)))  # Желтый текст
-            
             # Установка элементов в таблицу
             for col_idx, item in enumerate(items):
                 self.table.setItem(row_idx, col_idx, item)
-        
         # Обновление статуса
         visible_count = len(rows)
         total_count = len(self.ticker_data)
@@ -512,7 +557,6 @@ class BybitVolumeSpikesWidget(QWidget):
             f"Игнорируется: {ignored_count} | "
             f"Пороги: кратность ≥{min_ratio:.1f}x, объем ≥{min_volume:,.0f}"
         )
-        
         self.table.resizeRowsToContents()
 
     def manual_refresh(self):
@@ -531,13 +575,15 @@ class BybitVolumeSpikesWidget(QWidget):
                 self.timer.start(new_settings["update_interval"] * 1000)
             
             # Пересчитываем средние значения при изменении периода
-            if new_settings["window_size"] != self.settings["window_size"]:
+            if new_settings["mean_candles"] != self.settings["mean_candles"]:
                 self.set_status("Пересчёт средних значений...")
                 import qasync
                 qasync.asyncio.ensure_future(self.safe_update_online())
             
             self.settings = new_settings
             self.save_settings()
+            self.apply_font_size()
+            self.apply_font_sizes()
             self.update_table()
 
     def dark_stylesheet(self):
@@ -646,7 +692,7 @@ class BybitVolumeSpikesWidget(QWidget):
             "min_ratio": settings.value("min_ratio", 2.0, float),
             "min_volume": settings.value("min_volume", 10000, float),
             "update_interval": settings.value("update_interval", 90, int),
-            "window_size": settings.value("window_size", "Текущий день", str),
+            "mean_candles": settings.value("mean_candles", 20, int),
             "enable_sound": settings.value("enable_sound", True, bool),
             "enable_popup": settings.value("enable_popup", True, bool),
             "selected_type": settings.value("selected_type", "spot", str),
@@ -655,6 +701,10 @@ class BybitVolumeSpikesWidget(QWidget):
             "telegram_thread_id": settings.value("telegram_thread_id", "", str),
             "enable_telegram": settings.value("enable_telegram", False, bool),
             "log_limit": settings.value("log_limit", 50, int),
+            "font_size": settings.value("font_size", 12, int),
+            "font_size_table": settings.value("font_size_table", 12, int),
+            "font_size_panel": settings.value("font_size_panel", 12, int),
+            "font_size_log": settings.value("font_size_log", 12, int),
         }
         # Загрузка игнорируемых тикеров
         ignored = settings.value("ignored_tickers", "")
@@ -701,15 +751,8 @@ class BybitVolumeSpikesWidget(QWidget):
 
     def get_window_timestamp(self):
         now = datetime.now(timezone.utc)
-        
-        if self.settings["window_size"] == "Текущий день":
-            return int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
-        elif self.settings["window_size"] == "Последние 4 часа":
-            return int((now - timedelta(hours=4)).timestamp())
-        elif self.settings["window_size"] == "Последние 24 часа":
-            return int((now - timedelta(hours=24)).timestamp())
-        else:  # Последние 48 часов
-            return int((now - timedelta(hours=48)).timestamp())
+        n_candles = self.settings.get("mean_candles", 20)
+        return int((now - timedelta(minutes=15 * n_candles)).timestamp())
 
     async def async_load_stats(self):
         from_ts = self.get_window_timestamp()
@@ -827,6 +870,49 @@ class BybitVolumeSpikesWidget(QWidget):
             self.notification_log_dialog.load_log()
             self.notification_log_dialog.raise_()
             self.notification_log_dialog.activateWindow()
+
+    def apply_font_size(self):
+        font_size = self.settings.get("font_size", 12)
+        font = self.font()
+        font.setPointSize(font_size)
+        self.setFont(font)
+        # Применить к дочерним виджетам
+        for child in self.findChildren(QWidget):
+            child.setFont(font)
+
+    def apply_font_sizes(self):
+        # Таблица
+        table_font = self.table.font()
+        table_font.setPointSize(self.settings.get("font_size_table", 12))
+        self.table.setFont(table_font)
+        self.table.horizontalHeader().setFont(table_font)
+        self.table.verticalHeader().setFont(table_font)
+        # Панель и кнопки
+        panel_font = self.font()
+        panel_font.setPointSize(self.settings.get("font_size_panel", 12))
+        for widget in [self.status_label, self.spot_radio, self.linear_radio, self.name_filter_edit, self.volume_sort_cb, self.refresh_btn, self.settings_btn, self.log_btn, self.show_all_cb]:
+            if widget:
+                widget.setFont(panel_font)
+        # Журнал уведомлений (если открыт)
+        if self.notification_log_dialog is not None:
+            log_font = self.notification_log_dialog.text_edit.font()
+            log_font.setPointSize(self.settings.get("font_size_log", 12))
+            self.notification_log_dialog.text_edit.setFont(log_font)
+
+    def restore_main_window_geometry(self):
+        settings = QSettings("VolumeSpikes", "BybitMonitor")
+        geometry = settings.value("main_window_geometry")
+        if geometry:
+            self.restoreGeometry(geometry)
+        pos = settings.value("main_window_pos")
+        if pos:
+            self.move(pos)
+
+    def closeEvent(self, event):
+        settings = QSettings("VolumeSpikes", "BybitMonitor")
+        settings.setValue("main_window_geometry", self.saveGeometry())
+        settings.setValue("main_window_pos", self.pos())
+        super().closeEvent(event)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
