@@ -6,17 +6,21 @@ import numpy as np
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QTableWidget, QTableWidgetItem, QHeaderView, QLabel,
     QComboBox, QPushButton, QHBoxLayout, QAbstractItemView, QDialog, QFormLayout, QDialogButtonBox,
-    QDoubleSpinBox, QGroupBox, QCheckBox, QLineEdit, QSystemTrayIcon, QMessageBox, QMenu, QAction, QSpinBox, QRadioButton, QButtonGroup
+    QDoubleSpinBox, QGroupBox, QCheckBox, QLineEdit, QSystemTrayIcon, QMessageBox, QMenu, QAction, QSpinBox, QRadioButton, QButtonGroup, QTextEdit
 )
 from PyQt5.QtCore import QTimer, Qt, QSettings
 from PyQt5.QtGui import QColor, QBrush, QFont
 from PyQt5.QtMultimedia import QSound
 import qasync
 import webbrowser
+import os
+import requests
 
 BYBIT_SYMBOLS_URL = "https://api.bybit.com/v5/market/instruments-info?category={category}"
 BYBIT_KLINE_URL = "https://api.bybit.com/v5/market/kline?category={category}&symbol={symbol}&interval=15&from={from_ts}&limit=200"
 CATEGORIES = ["spot", "linear"]
+
+NOTIFICATION_LOG_FILE = "notification_log.txt"
 
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
@@ -69,8 +73,33 @@ class SettingsDialog(QDialog):
         self.enable_popup_cb = QCheckBox("Всплывающие уведомления")
         self.enable_popup_cb.setChecked(parent.settings["enable_popup"])
         notify_layout.addWidget(self.enable_popup_cb)
-        notify_group.setLayout(notify_layout)
-        layout.addWidget(notify_group)
+        
+        # Telegram
+        telegram_group = QGroupBox("Telegram уведомления")
+        telegram_layout = QFormLayout()
+        self.telegram_token_edit = QLineEdit()
+        self.telegram_token_edit.setText(parent.settings.get("telegram_token", ""))
+        telegram_layout.addRow("Токен бота:", self.telegram_token_edit)
+        self.telegram_chat_id_edit = QLineEdit()
+        self.telegram_chat_id_edit.setText(parent.settings.get("telegram_chat_id", ""))
+        telegram_layout.addRow("Chat ID:", self.telegram_chat_id_edit)
+        self.telegram_thread_id_edit = QLineEdit()
+        self.telegram_thread_id_edit.setText(parent.settings.get("telegram_thread_id", ""))
+        telegram_layout.addRow("Message Thread ID (опц.):", self.telegram_thread_id_edit)
+        self.enable_telegram_cb = QCheckBox("Отправлять уведомления в Telegram")
+        self.enable_telegram_cb.setChecked(parent.settings.get("enable_telegram", False))
+        telegram_layout.addRow(self.enable_telegram_cb)
+        # Кнопка теста Telegram
+        self.test_telegram_btn = QPushButton("Отправить тестовое сообщение")
+        self.test_telegram_btn.clicked.connect(self.send_test_telegram)
+        telegram_layout.addRow(self.test_telegram_btn)
+        # Лимит журнала уведомлений
+        self.log_limit_spin = QSpinBox()
+        self.log_limit_spin.setRange(10, 500)
+        self.log_limit_spin.setValue(parent.settings.get("log_limit", 50))
+        telegram_layout.addRow("Лимит журнала:", self.log_limit_spin)
+        telegram_group.setLayout(telegram_layout)
+        layout.addWidget(telegram_group)
         
         # Кнопки
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -79,59 +108,170 @@ class SettingsDialog(QDialog):
         layout.addWidget(buttons)
 
     def get_settings(self):
-        return {
+        s = {
             "min_ratio": self.min_ratio_spin.value(),
             "min_volume": self.min_volume_spin.value(),
             "update_interval": self.update_interval_spin.value(),
             "window_size": self.window_size_combo.currentText(),
             "enable_sound": self.enable_sound_cb.isChecked(),
-            "enable_popup": self.enable_popup_cb.isChecked()
+            "enable_popup": self.enable_popup_cb.isChecked(),
+            "telegram_token": self.telegram_token_edit.text().strip(),
+            "telegram_chat_id": self.telegram_chat_id_edit.text().strip(),
+            "telegram_thread_id": self.telegram_thread_id_edit.text().strip(),
+            "enable_telegram": self.enable_telegram_cb.isChecked(),
+            "log_limit": self.log_limit_spin.value(),
         }
+        return s
+
+    def send_test_telegram(self):
+        token = self.telegram_token_edit.text().strip()
+        chat_id = self.telegram_chat_id_edit.text().strip()
+        thread_id = self.telegram_thread_id_edit.text().strip()
+        if not token or not chat_id:
+            QMessageBox.warning(self, "Ошибка", "Укажите токен и chat_id!")
+            return
+        import requests
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        data = {
+            "chat_id": chat_id,
+            "text": "Тестовое сообщение от Bybit Volume Spikes!",
+            "parse_mode": "HTML"
+        }
+        if thread_id:
+            if thread_id.isdigit():
+                data["message_thread_id"] = int(thread_id)
+        try:
+            resp = requests.post(url, data=data, timeout=10)
+            if resp.ok:
+                QMessageBox.information(self, "Успех", "Тестовое сообщение отправлено!")
+            else:
+                QMessageBox.warning(self, "Ошибка", f"Ошибка Telegram: {resp.status_code} {resp.text}")
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка", f"Ошибка Telegram: {e}")
+
+class NotificationLogDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Журнал уведомлений")
+        self.setMinimumWidth(600)
+        self.setMinimumHeight(400)
+        layout = QVBoxLayout(self)
+        self.text_edit = QTextEdit(self)
+        self.text_edit.setReadOnly(True)
+        layout.addWidget(self.text_edit)
+        self.load_log()
+    def load_log(self):
+        limit = getattr(self.parent(), 'settings', {}).get('log_limit', 50) if self.parent() else 50
+        if os.path.exists(NOTIFICATION_LOG_FILE):
+            with open(NOTIFICATION_LOG_FILE, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+                self.text_edit.setPlainText(''.join(lines[:limit]))
+        else:
+            self.text_edit.setPlainText("Журнал пуст.")
 
 class NotificationSystem:
     def __init__(self, parent):
         self.parent = parent
         self.notified_pairs = set()
-        
+        self.log = []
+        self.load_log()
+    def load_log(self):
+        if os.path.exists(NOTIFICATION_LOG_FILE):
+            with open(NOTIFICATION_LOG_FILE, "r", encoding="utf-8") as f:
+                self.log = [line.strip() for line in f if line.strip()]
+        else:
+            self.log = []
+    def save_log(self):
+        with open(NOTIFICATION_LOG_FILE, "w", encoding="utf-8") as f:
+            for entry in self.log:
+                f.write(entry + "\n")
     def check_and_notify(self, ticker_data):
         if not self.parent.isVisible():
             return
-            
         for key, data in ticker_data.items():
             if not data or 'datetime' not in data:
                 continue
-                
             notification_id = f"{key}-{data['datetime']}"
-            
             if notification_id in self.notified_pairs:
                 continue
-                
             if (data['ratio'] >= self.parent.settings["min_ratio"] and 
                 data['volume'] >= self.parent.settings["min_volume"]):
-                
                 self.notified_pairs.add(notification_id)
                 self.send_notification(data)
-    
     def send_notification(self, data):
-        message = (f"{data['symbol']} ({data['category']}) - {data['ratio']:.1f}x\n"
-                   f"Объем: {data['volume']:,.0f} USD")
-        
-        # Всплывающее уведомление
-        if self.parent.settings["enable_popup"]:
-            try:
-                QMessageBox.information(self.parent, "Объемная вспышка!", message)
-            except Exception as e:
-                print(f"Ошибка уведомления: {e}")
-        
-        # Звуковое уведомление
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        tv_symbol = f"BYBIT:{data['symbol']}"
+        if data['category'] == 'linear':
+            tv_symbol += '.P'
+        tv_url = f"https://www.tradingview.com/chart/?symbol={tv_symbol}"
+        hashtag_symbol = f"#{data['symbol']}"
+        price = data.get('price', None)
+        price_str = f"цена: {price:.3f}" if price is not None else ""
+        # Ссылка в формате Markdown
+        link_md = f"[ссылка на график]({tv_url})"
+        message = (f"{hashtag_symbol} ({data['category']}) - {data['ratio']:.1f}x - {link_md}\n"
+                   f"{price_str}\n"
+                   f"Объем: {data['volume']:,.0f} USD\nВремя: {now}")
+        log_entry = f"[{now}] {data['symbol']} ({data['category']}) - {data['ratio']:.1f}x, {price_str}, Объем: {data['volume']:,.0f} USD"
+        self.log.insert(0, log_entry)
+        self.log = self.log[:500]  # ограничим журнал 500 последних событий
+        self.save_log()
+        # Telegram и звук
+        s = self.parent.settings
+        if s.get("enable_telegram") and s.get("telegram_token") and s.get("telegram_chat_id"):
+            self.send_telegram_message(
+                s["telegram_token"],
+                s["telegram_chat_id"],
+                message,
+                s.get("telegram_thread_id"),
+                parse_mode="Markdown"
+            )
         if self.parent.settings["enable_sound"]:
             try:
                 QSound.play("alert.wav")
             except:
                 print("Не удалось воспроизвести звук alert.wav")
-        
-        # Логирование в консоль
-        print(f"[ALERT] {datetime.now().strftime('%H:%M:%S')} - {message}")
+        print(f"[ALERT] {now} - {message}")
+        self.parent.show_notification_log(message)
+
+    def send_telegram_message(self, token, chat_id, text, thread_id=None, parse_mode="HTML"):
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        data = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": parse_mode,
+            "disable_web_page_preview": True
+        }
+        if thread_id:
+            if thread_id.isdigit():
+                data["message_thread_id"] = int(thread_id)
+            else:
+                print(f"[Telegram] Некорректный message_thread_id: {thread_id}")
+        try:
+            resp = requests.post(url, data=data, timeout=10)
+            if not resp.ok:
+                print(f"[Telegram] Ошибка отправки: {resp.status_code} {resp.text}")
+        except Exception as e:
+            print(f"[Telegram] Ошибка отправки: {e}")
+    def show_notification_log(self, current_message):
+        dlg = QDialog(self.parent)
+        dlg.setWindowTitle("Уведомление и журнал")
+        dlg.setMinimumWidth(600)
+        dlg.setMinimumHeight(400)
+        layout = QVBoxLayout(dlg)
+        label = QLabel(f"<b>Новое уведомление:</b><br>{current_message.replace(chr(10), '<br>')}")
+        layout.addWidget(label)
+        text_edit = QTextEdit(dlg)
+        text_edit.setReadOnly(True)
+        text_edit.setPlainText("\n".join(self.log))
+        layout.addWidget(text_edit)
+        btn_box = QDialogButtonBox(QDialogButtonBox.Ok)
+        btn_box.accepted.connect(dlg.accept)
+        layout.addWidget(btn_box)
+        # Авто-закрытие через 5 секунд
+        from PyQt5.QtCore import QTimer
+        QTimer.singleShot(5000, dlg.accept)
+        dlg.show()
 
 class BybitVolumeSpikesWidget(QWidget):
     def __init__(self):
@@ -175,6 +315,11 @@ class BybitVolumeSpikesWidget(QWidget):
         self.volume_sort_cb.stateChanged.connect(self.update_table)
         filter_layout.addWidget(self.volume_sort_cb)
         
+        # Показывать все тикеры
+        self.show_all_cb = QCheckBox("Показывать все тикеры")
+        self.show_all_cb.stateChanged.connect(self.update_table)
+        filter_layout.addWidget(self.show_all_cb)
+        
         # Кнопки
         self.refresh_btn = QPushButton("Обновить")
         self.refresh_btn.clicked.connect(self.manual_refresh)
@@ -184,6 +329,10 @@ class BybitVolumeSpikesWidget(QWidget):
         self.settings_btn.clicked.connect(self.open_settings)
         filter_layout.addWidget(self.settings_btn)
         
+        self.log_btn = QPushButton("Журнал уведомлений")
+        self.log_btn.clicked.connect(self.show_notification_log)
+        filter_layout.addWidget(self.log_btn)
+
         filter_layout.addStretch(1)
         layout.addLayout(filter_layout)
         
@@ -207,7 +356,8 @@ class BybitVolumeSpikesWidget(QWidget):
         self.ignored_tickers = set()
         self.loop = None
         self.timer = QTimer(self)
-        self.timer.timeout.connect(lambda: asyncio.create_task(self.update_online()))
+        self.update_task = None
+        self.timer.timeout.connect(lambda: qasync.asyncio.ensure_future(self.safe_update_online()))
         
         # Загрузка настроек
         self.load_settings()
@@ -224,6 +374,7 @@ class BybitVolumeSpikesWidget(QWidget):
         # Запуск инициализации
         self.init_task = None
         self.load_stats()
+        self.notification_log_dialog = None
 
     def set_status(self, text):
         self.status_label.setText(text)
@@ -290,7 +441,11 @@ class BybitVolumeSpikesWidget(QWidget):
         name_filter = self.name_filter_edit.text().strip().upper()
         min_ratio = self.settings["min_ratio"]
         min_volume = self.settings["min_volume"]
-        
+        show_all = self.show_all_cb.isChecked()
+        print(f"[DEBUG] update_table: type_filter={type_filter}, show_all={show_all}, min_ratio={min_ratio}, min_volume={min_volume}")
+        print(f"[DEBUG] Всего тикеров в ticker_data: {len(self.ticker_data)}")
+        for k, v in self.ticker_data.items():
+            print(f"[DEBUG] {v['symbol']} category: {v['category']}, volume: {v['volume']}, ratio: {v['ratio']}")
         rows = []
         for key, v in self.ticker_data.items():
             # Пропускаем игнорируемые тикеры
@@ -304,8 +459,9 @@ class BybitVolumeSpikesWidget(QWidget):
             if name_filter and name_filter not in v['symbol'].upper():
                 continue
                 
-            if v['volume'] < min_volume or v['ratio'] < min_ratio:
-                continue
+            if not show_all:
+                if v['volume'] < min_volume or v['ratio'] < min_ratio:
+                    continue
                 
             rows.append(v)
         
@@ -361,7 +517,8 @@ class BybitVolumeSpikesWidget(QWidget):
 
     def manual_refresh(self):
         self.set_status("Ручное обновление...")
-        asyncio.create_task(self.update_online(async_manual=True))
+        import qasync
+        qasync.asyncio.ensure_future(self.safe_update_online(async_manual=True))
 
     def open_settings(self):
         dialog = SettingsDialog(self)
@@ -376,7 +533,8 @@ class BybitVolumeSpikesWidget(QWidget):
             # Пересчитываем средние значения при изменении периода
             if new_settings["window_size"] != self.settings["window_size"]:
                 self.set_status("Пересчёт средних значений...")
-                asyncio.create_task(self.recalculate_means())
+                import qasync
+                qasync.asyncio.ensure_future(self.safe_update_online())
             
             self.settings = new_settings
             self.save_settings()
@@ -491,7 +649,12 @@ class BybitVolumeSpikesWidget(QWidget):
             "window_size": settings.value("window_size", "Текущий день", str),
             "enable_sound": settings.value("enable_sound", True, bool),
             "enable_popup": settings.value("enable_popup", True, bool),
-            "selected_type": settings.value("selected_type", "spot", str)
+            "selected_type": settings.value("selected_type", "spot", str),
+            "telegram_token": settings.value("telegram_token", "", str),
+            "telegram_chat_id": settings.value("telegram_chat_id", "", str),
+            "telegram_thread_id": settings.value("telegram_thread_id", "", str),
+            "enable_telegram": settings.value("enable_telegram", False, bool),
+            "log_limit": settings.value("log_limit", 50, int),
         }
         # Загрузка игнорируемых тикеров
         ignored = settings.value("ignored_tickers", "")
@@ -537,7 +700,7 @@ class BybitVolumeSpikesWidget(QWidget):
         self.set_status("Средние значения пересчитаны")
 
     def get_window_timestamp(self):
-        now = datetime.utcnow().replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
         
         if self.settings["window_size"] == "Текущий день":
             return int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
@@ -578,6 +741,18 @@ class BybitVolumeSpikesWidget(QWidget):
         self.set_status("Готово. Ожидание онлайн-обновлений...")
         await self.update_online()
 
+    async def safe_update_online(self, async_manual=False):
+        import logging
+        if self.update_task and not self.update_task.done():
+            print("[DEBUG] Обновление уже выполняется, новый запуск отменён.")
+            return  # Уже идёт обновление
+        print(f"[DEBUG] Старт обновления (async_manual={async_manual})")
+        import qasync
+        self.update_task = qasync.asyncio.ensure_future(self.update_online(async_manual))
+        def on_done(fut):
+            print(f"[DEBUG] Обновление завершено (async_manual={async_manual})")
+        self.update_task.add_done_callback(on_done)
+
     async def get_all_tickers(self, selected_type):
         tickers = []
         async with aiohttp.ClientSession() as session:
@@ -605,45 +780,53 @@ class BybitVolumeSpikesWidget(QWidget):
             return []
 
     async def update_online(self, async_manual=False):
-        if not self.ticker_data:
+        import asyncio
+        try:
+            if not self.ticker_data:
+                return
+            now = datetime.now(timezone.utc)
+            from_ts = int((now - timedelta(minutes=30)).timestamp())
+            count = 0
+            selected_type = self.settings.get("selected_type", "spot")
+            for idx, (symbol, category) in enumerate(list(self.ticker_data.keys())):
+                if (symbol, category) in self.ignored_tickers:
+                    continue
+                if category != selected_type:
+                    continue
+                mean = self.ticker_data[(symbol, category)]['mean']
+                klines = await self.get_klines(symbol, category, from_ts)
+                if not klines:
+                    continue
+                last = klines[0]
+                vol = float(last[5])
+                ts = int(last[0]) // 1000
+                dt = datetime.fromtimestamp(ts, timezone.utc).strftime('%H:%M')
+                ratio = vol / (mean + 1e-9)
+                price = float(last[4])
+                self.ticker_data[(symbol, category)].update({
+                    'volume': vol,
+                    'ratio': ratio,
+                    'datetime': dt,
+                    'price': price
+                })
+                count += 1
+                if async_manual and (idx+1) % 20 == 0:
+                    self.set_status(f"Обновление: {idx+1}/{len(self.ticker_data)}")
+            self.notifier.check_and_notify(self.ticker_data)
+            self.update_table()
+            self.set_status(f"Обновлено: {count} тикеров, {datetime.now().strftime('%H:%M:%S')}")
+        except asyncio.CancelledError:
             return
-            
-        now = datetime.utcnow().replace(tzinfo=timezone.utc)
-        from_ts = int((now - timedelta(minutes=30)).timestamp())
-        count = 0
-        selected_type = self.settings.get("selected_type", "spot")
-        for idx, (symbol, category) in enumerate(list(self.ticker_data.keys())):
-            # Пропускаем игнорируемые тикеры
-            if (symbol, category) in self.ignored_tickers:
-                continue
-                
-            mean = self.ticker_data[(symbol, category)]['mean']
-            klines = await self.get_klines(symbol, category, from_ts)
-            if not klines:
-                continue
-                
-            last = klines[0]  # Последняя свеча
-            vol = float(last[5])
-            ts = int(last[0]) // 1000
-            dt = datetime.utcfromtimestamp(ts).strftime('%H:%M')
-            ratio = vol / (mean + 1e-9)
-            
-            self.ticker_data[(symbol, category)].update({
-                'volume': vol,
-                'ratio': ratio,
-                'datetime': dt
-            })
-            
-            count += 1
-            if async_manual and (idx+1) % 20 == 0:
-                self.set_status(f"Обновление: {idx+1}/{len(self.ticker_data)}")
-        
-        # Проверка уведомлений
-        self.notifier.check_and_notify(self.ticker_data)
-        
-        # Обновление таблицы
-        self.update_table()
-        self.set_status(f"Обновлено: {count} тикеров, {datetime.now().strftime('%H:%M:%S')}")
+
+    def show_notification_log(self, current_message=None):
+        if self.notification_log_dialog is None or not self.notification_log_dialog.isVisible():
+            self.notification_log_dialog = NotificationLogDialog(self)
+            self.notification_log_dialog.show()
+        if current_message is not None:
+            # Обновить содержимое
+            self.notification_log_dialog.load_log()
+            self.notification_log_dialog.raise_()
+            self.notification_log_dialog.activateWindow()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
